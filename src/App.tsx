@@ -301,6 +301,11 @@ export default function App() {
   const [newBiome, setNewBiome] = useState<Biome>("meadow");
   const [newSeed, setNewSeed] = useState(48291);
   const world = useRef<WorldHandle>(null);
+  const compass = useRef<SVGSVGElement>(null);
+  const updateBearing = useCallback((radians: number) => {
+    if (compass.current)
+      compass.current.style.transform = `rotate(${radians}rad)`;
+  }, []);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audio = useRef<AudioContext | null>(null);
   const gain = useRef<GainNode | null>(null);
@@ -582,6 +587,7 @@ export default function App() {
                 labels={labels}
                 onReady={() => setReady(true)}
                 onError={setError}
+                onBearingChange={updateBearing}
               />
               <div className="stage-vignette" />
               <div className="stage-top">
@@ -701,13 +707,18 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className="compass">
+              <button
+                className="compass"
+                aria-label="Face north"
+                title="Face north"
+                onClick={() => world.current?.north()}
+              >
                 <span>N</span>
-                <svg viewBox="0 0 40 40">
+                <svg ref={compass} viewBox="0 0 40 40" aria-hidden="true">
                   <path d="M20 3L27 27L20 23L13 27Z" fill="var(--ef-fg)" />
                   <path d="M20 3V23L13 27Z" fill="var(--ef-green)" />
                 </svg>
-              </div>
+              </button>
               <div className="view-tools">
                 <button
                   aria-label="Zoom in"
@@ -779,10 +790,10 @@ export default function App() {
                     {timestamp(simulation.time)}
                   </div>
                 </div>
-                <div className="map-card">
-                  <MiniMap simulation={simulation} />
-                  <span>ISLAND 01</span>
-                </div>
+              </div>
+              <div className="map-card">
+                <MiniMap simulation={simulation} />
+                <span>ISLAND 01</span>
               </div>
               <div className="world-hint">
                 <span className="live-dot" />

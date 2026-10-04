@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Simulation, DEFAULT_GENES, mutationCost, onLand } from "./simulation";
+import {
+  angleDifference,
+  creatureContact,
+  creatureExtent,
+  obstacleContact,
+} from "./locomotion";
+import { createHabitat } from "./habitat";
 
 function advance(sim: Simulation, seconds: number) {
   for (let i = 0; i < Math.ceil(seconds / 0.1); i++) sim.update(0.1);
@@ -13,7 +20,7 @@ test("a seeded ecosystem grows, hunts, and keeps creatures on the island", () =>
   advance(b, 180);
   assert.equal(a.population, b.population);
   assert.deepEqual(a.creatures, b.creatures);
-  assert.ok(a.births > 15, "animals reproduce");
+  assert.ok(a.births > 5, "animals find mates and reproduce");
   assert.ok(a.deaths > 0, "predators hunt");
   assert.ok(
     a.population > 0,
@@ -77,10 +84,12 @@ test("armor reduces damage in an otherwise identical encounter", () => {
     const prey = sim.creatures[0];
     prey.x = 0;
     prey.z = 0;
+    prey.heading = 0;
     prey.genes = { ...prey.genes, defense };
     const predator = sim.spawn("razorback");
     predator.x = 0;
-    predator.z = 0.5;
+    predator.z = creatureExtent(prey) + creatureExtent(predator) + 0.08;
+    predator.heading = Math.PI;
     sim.update(0.1);
     return prey.health;
   }
@@ -134,4 +143,216 @@ test("a saved world resumes with the same creatures, genome, and random sequence
 test("unsupported or corrupt saves are rejected", () => {
   assert.throws(() => Simulation.restore("{bad json}"));
   assert.throws(() => Simulation.restore('{"version":99,"state":{}}'));
+});
+
+function assertClear(sim: Simulation) {
+  for (let i = 0; i < sim.creatures.length; i++) {
+    const c = sim.creatures[i];
+    assert.ok(
+      onLand(c.x, c.z, creatureExtent(c) + 0.14),
+      `creature ${c.id} stays clear of the shore`,
+    );
+    for (const o of sim.obstacles)
+      assert.ok(
+        obstacleContact(c, o).gap >= -0.0001,
+        `creature ${c.id} overlaps ${o.id}`,
+      );
+    for (const other of sim.creatures.slice(i + 1))
+      assert.ok(
+        creatureContact(c, other).gap >= -0.0001,
+        `creatures ${c.id} and ${other.id} overlap`,
+      );
+  }
+}
+
+test("head-on animals pass each other without overlap or a stationary spin", () => {
+  const sim = new Simulation();
+  sim.creatures = sim.creatures.slice(0, 2);
+  sim.food = [];
+  const [a, b] = sim.creatures;
+  for (const [c, direction] of [
+    [a, 1],
+    [b, -1],
+  ] as const) {
+    Object.assign(c, {
+      x: -5 * direction,
+      z: 0,
+      heading: (Math.PI / 2) * direction,
+      targetX: 10 * direction,
+      targetZ: 0,
+      age: 30,
+      energy: 80,
+      cooldown: 999,
+    });
+  }
+  for (let i = 0; i < 80; i++) {
+    sim.update(0.1);
+    assertClear(sim);
+  }
+  assert.ok(
+    a.x > 2 && b.x < -2,
+    "both animals make forward progress past the encounter",
+  );
+});
+
+test("crowded legacy saves separate animals and preserve the player's genome", () => {
+  const original = new Simulation();
+  original.creatures = original.creatures.filter(
+    (c) => c.species === "mossling",
+  );
+  const saved = JSON.parse(original.serialize());
+  for (const c of saved.state.creatures) {
+    Object.assign(c, { x: 0, z: 0, heading: Math.PI * 24, age: 30 });
+    delete c.velocityX;
+    delete c.velocityZ;
+  }
+  const restored = Simulation.restore(JSON.stringify(saved));
+  assertClear(restored);
+  assert.deepEqual(restored.genes, original.genes);
+  assert.equal(restored.population, original.population);
+  assert.ok(
+    restored.creatures.every(
+      (c) =>
+        Math.abs(c.heading) <= Math.PI &&
+        c.velocityX === 0 &&
+        c.velocityZ === 0,
+    ),
+  );
+  assert.ok(Math.abs(angleDifference(0.2, Math.PI * 24)) - 0.2 < 1e-10);
+});
+
+test("growing, mutated and newborn bodies remain clear of animals, rocks and trees", () => {
+  const sim = new Simulation(123);
+  assert.ok(sim.mutate({ ...sim.genes, size: 90 }));
+  for (let i = 0; i < 4; i++) sim.spawn("mossling", sim.creatures[0]);
+  assertClear(sim);
+  for (let i = 0; i < 250; i++) {
+    sim.update(0.08);
+    assertClear(sim);
+  }
+});
+
+test("animals navigate around an actual rendered tree instead of running through its trunk", () => {
+  const sim = new Simulation();
+  assert.deepEqual(sim.obstacles, createHabitat(sim.initialSeed).obstacles);
+  const tree = sim.obstacles.find((o) => o.id === "tree-16")!;
+  sim.creatures = sim.creatures.slice(0, 1);
+  sim.food = [];
+  const c = sim.creatures[0];
+  Object.assign(c, {
+    x: tree.x - 4,
+    z: tree.z,
+    heading: Math.PI / 2,
+    targetX: tree.x + 4,
+    targetZ: tree.z,
+    age: 30,
+    energy: 65,
+    cooldown: 999,
+  });
+  let passed = false;
+  for (let i = 0; i < 120; i++) {
+    sim.update(0.1);
+    assertClear(sim);
+    if (c.x > tree.x + 2) {
+      passed = true;
+      break;
+    }
+  }
+  assert.ok(passed, "the animal passes the trunk and reaches the other side");
+});
+
+test("a fleeing animal follows the shore without spinning or leaving land", () => {
+  const sim = new Simulation();
+  sim.creatures = sim.creatures.slice(0, 1);
+  sim.food = [];
+  const c = sim.creatures[0];
+  Object.assign(c, {
+    x: 17,
+    z: 0,
+    heading: Math.PI / 2,
+    age: 30,
+    energy: 90,
+    cooldown: 999,
+  });
+  c.genes.speed = 90;
+  const predator = sim.spawn("razorback");
+  Object.assign(predator, { x: 13, z: 0, heading: Math.PI / 2, cooldown: 999 });
+  sim.resolveCollisions();
+  const start = { x: c.x, z: c.z };
+  let totalTurn = 0;
+  for (let i = 0; i < 80; i++) {
+    const previous = c.heading;
+    sim.update(0.1);
+    const turn = Math.abs(angleDifference(c.heading, previous));
+    assert.ok(turn <= 0.301, "turn rate is bounded");
+    totalTurn += turn;
+    assertClear(sim);
+  }
+  assert.ok(
+    Math.hypot(c.x - start.x, c.z - start.z) > 4,
+    "the animal escapes the edge",
+  );
+  assert.ok(totalTurn < Math.PI * 3, "the animal does not repeatedly spin");
+});
+
+test("predators run out of energy and die when they cannot catch food", () => {
+  const sim = new Simulation();
+  sim.creatures = sim.creatures.filter((c) => c.species === "razorback");
+  advance(sim, 120);
+  assert.equal(sim.predators, 0);
+  assert.equal(sim.deaths, 5);
+  assert.ok(sim.events.some((e) => e.title === "A hunter ran out of food."));
+});
+
+test("a successful bite flashes on both animals and feeds the predator after a kill", () => {
+  const sim = new Simulation(32);
+  sim.creatures = sim.creatures.slice(0, 1);
+  sim.food = [];
+  const prey = sim.creatures[0];
+  Object.assign(prey, { x: 0, z: 0, heading: 0, health: 1, cooldown: 999 });
+  const predator = sim.spawn("razorback");
+  Object.assign(predator, {
+    x: 0,
+    z: creatureExtent(prey) + creatureExtent(predator) + 0.08,
+    heading: Math.PI,
+    energy: 15,
+    cooldown: 999,
+  });
+  sim.update(0.1);
+  assert.ok(predator.attackFlash! > 0);
+  assert.ok(prey.damageFlash! > 0);
+  assert.equal(sim.population, 0);
+  assert.ok(predator.energy > 60, "a successful hunt restores energy");
+});
+
+test("reproduction requires two adults and shows a mating activity", () => {
+  const sim = new Simulation(32);
+  sim.creatures = sim.creatures.slice(0, 2);
+  sim.food = [];
+  const [a, b] = sim.creatures;
+  for (const [c, direction] of [
+    [a, -1],
+    [b, 1],
+  ] as const) {
+    Object.assign(c, {
+      x: direction * (creatureExtent(c) + 0.1),
+      z: 0,
+      heading: (-direction * Math.PI) / 2,
+      age: 30,
+      energy: 90,
+      cooldown: 0,
+    });
+    c.genes.fertility = 100;
+  }
+  for (let i = 0; i < 100 && !sim.births; i++) sim.update(0.1);
+  assert.equal(sim.births, 1);
+  assert.ok(
+    a.matingTime! > 0 && b.matingTime! > 0,
+    "both parents show mating hearts",
+  );
+  assert.ok(
+    a.cooldown > 0 && b.cooldown > 0,
+    "both parents wait before breeding again",
+  );
+  assertClear(sim);
 });

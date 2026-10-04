@@ -490,7 +490,10 @@ button svg {
 .compass svg {
   width: 30px;
   height: 30px;
-  transform: rotate(-28deg);
+  transform: rotate(0deg);
+}
+.compass:hover {
+  opacity: 0.75;
 }
 .view-tools {
   position: absolute;
@@ -3015,4 +3018,88 @@ kbd {
 ::selection {
   background: var(--ef-bg-green);
   color: var(--ef-fg);
+}
+
+/* Compact population readouts leave the habitat visible. */
+.view-tools {
+  top: auto;
+  bottom: 35px;
+}
+.map-card {
+  display: flex;
+  position: absolute;
+  top: 82px;
+  right: 68px;
+  width: 250px;
+  padding: 7px;
+}
+.minimap {
+  width: 234px;
+  height: 234px;
+}
+.map-card > span {
+  font-size: 7px;
+}
+.world-metrics {
+  flex-direction: column;
+  gap: 6px;
+  top: 82px;
+  left: 19px;
+}
+.world-metric,
+.world-metric.biodiversity-metric {
+  display: block;
+  width: 106px;
+  min-width: 0;
+  padding: 8px 9px 7px;
+}
+.world-metric > span {
+  gap: 4px;
+  font-size: 7px;
+}
+.world-metric > span svg {
+  width: 11px;
+  height: 11px;
+}
+.world-metric > strong {
+  font-size: 23px;
+  line-height: 1.2;
+  margin-top: 4px;
+  gap: 6px;
+}
+.world-metric strong small {
+  font-size: 6px;
+}
+.metric-bottom {
+  font-size: 6px;
+  margin-top: 3px;
+}
+@media (max-width: 650px) {
+  .map-card {
+    top: 63px;
+    right: 57px;
+    width: 190px;
+    padding: 4px;
+  }
+  .minimap {
+    width: 180px;
+    height: 180px;
+  }
+  .world-metrics {
+    top: 63px;
+    left: 14px;
+    gap: 5px;
+  }
+  .world-metric,
+  .world-metric.biodiversity-metric {
+    width: 82px;
+    padding: 7px 8px 6px;
+  }
+  .world-metric > strong {
+    font-size: 21px;
+    gap: 4px;
+  }
+  .world-metric strong small {
+    font-size: 5px;
+  }
 }

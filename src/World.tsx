@@ -8,12 +8,15 @@ import {
 } from "./creatures";
 import { terrainHeight, islandRadius } from "./simulation";
 import type { Simulation, Creature } from "./simulation";
+import { creatureScale } from "./locomotion";
+import { createHabitat, TERRAIN_RINGS, TERRAIN_SEGMENTS } from "./habitat";
 
 export interface WorldHandle {
   zoom: (direction: number) => void;
   reset: () => void;
   focus: (id: number) => void;
   overhead: () => void;
+  north: () => void;
 }
 interface Props {
   simulation: Simulation;
@@ -25,6 +28,7 @@ interface Props {
   labels: boolean;
   onReady: () => void;
   onError: (message: string) => void;
+  onBearingChange: (radians: number) => void;
 }
 const plantMat = new Map<string, THREE.MeshStandardMaterial>();
 function mat(color: string) {
@@ -68,11 +72,11 @@ const ico = new THREE.IcosahedronGeometry(1, 0),
   ball = new THREE.IcosahedronGeometry(1, 1),
   cone = new THREE.ConeGeometry(1, 1, 7),
   cylinder = new THREE.CylinderGeometry(0.13, 0.2, 1, 7);
-function makeTree(kind: number, scale: number) {
+function makeTree(kind: number, scale: number, darkShade: boolean) {
   const group = new THREE.Group();
   meshPart(group, cylinder, "#776a49", 0, 1, 0, 1, 2, 1);
   if (kind < 0.56) {
-    const shade = rand() < 0.5 ? "#617e58" : "#718f60";
+    const shade = darkShade ? "#617e58" : "#718f60";
     meshPart(group, cone, shade, 0, 2.3, 0, 1.05, 1.7, 1.05);
     meshPart(group, cone, "#86a774", 0, 3.04, 0, 0.85, 1.6, 0.85);
     meshPart(group, cone, "#9ab983", 0, 3.65, 0, 0.58, 1.42, 0.58);
@@ -106,8 +110,8 @@ function makeFern() {
   return group;
 }
 function makeTerrain() {
-  const segments = 128,
-    rings = 22;
+  const segments = TERRAIN_SEGMENTS,
+    rings = TERRAIN_RINGS;
   const positions: number[] = [],
     colors: number[] = [];
   const centerColor = new THREE.Color();
@@ -247,6 +251,7 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     controls: OrbitControls;
     groups: Map<number, THREE.Group>;
     following: number | null;
+    render: () => void;
   } | null>(null);
   useImperativeHandle(
     ref,
@@ -257,6 +262,8 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
           const d = v.camera.position.clone().sub(v.controls.target);
           d.multiplyScalar(direction > 0 ? 0.82 : 1.22);
           v.camera.position.copy(v.controls.target).add(d);
+          v.controls.update();
+          v.render();
         }
       },
       reset() {
@@ -265,6 +272,8 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
           v.following = null;
           v.camera.position.set(28, 32, 36);
           v.controls.target.set(0, 0, 0);
+          v.controls.update();
+          v.render();
         }
       },
       focus(id) {
@@ -275,6 +284,8 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
           const target = new THREE.Vector3(c.x, terrainHeight(c.x, c.z), c.z);
           v.controls.target.copy(target);
           v.camera.position.copy(target).add(new THREE.Vector3(7, 7, 9));
+          v.controls.update();
+          v.render();
         }
       },
       overhead() {
@@ -283,7 +294,26 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
           v.following = null;
           v.camera.position.set(0, 52, 0.01);
           v.controls.target.set(0, 0, 0);
+          v.controls.update();
+          v.render();
         }
+      },
+      north() {
+        const v = internals.current;
+        if (!v) return;
+        v.following = null;
+        const damping = v.controls.enableDamping;
+        v.controls.enableDamping = false;
+        v.controls.update();
+        const offset = v.camera.position.clone().sub(v.controls.target);
+        v.camera.position.set(
+          v.controls.target.x,
+          v.controls.target.y + offset.y,
+          v.controls.target.z + Math.max(0.01, Math.hypot(offset.x, offset.z)),
+        );
+        v.controls.update();
+        v.controls.enableDamping = damping;
+        v.render();
       },
     }),
     [],
@@ -322,6 +352,16 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     controls.maxPolarAngle = Math.PI * 0.47;
     controls.target.set(0, 0, 0);
     controls.enablePan = true;
+    const syncBearing = () => {
+      const bearing = controls.getAzimuthalAngle();
+      el.dataset.bearing = String(bearing);
+      el.dataset.cameraDistance = String(
+        camera.position.distanceTo(controls.target),
+      );
+      current.current.onBearingChange(bearing);
+    };
+    controls.addEventListener("change", syncBearing);
+    syncBearing();
     scene.add(new THREE.HemisphereLight("#ecf2d0", "#3f5b47", 1.65));
     const sun = new THREE.DirectionalLight("#fff1ca", 2.5);
     sun.position.set(-22, 38, 15);
@@ -343,6 +383,23 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     randSeed =
       (Math.abs(current.current.simulation.initialSeed) % 2147483646) + 1;
     world.add(makeTerrain());
+    const habitat = createHabitat(current.current.simulation.initialSeed);
+    function addRocks(rocks: typeof habitat.shoreRocks) {
+      for (const r of rocks) {
+        const rock = meshPart(
+          world,
+          ico,
+          r.color,
+          r.x,
+          r.y,
+          r.z,
+          r.sx,
+          r.sy,
+          r.sz,
+        );
+        rock.rotation.set(r.rx, r.ry, r.rz);
+      }
+    }
     const waterMaterial = new THREE.ShaderMaterial({
       uniforms: { uTime: { value: 0 } },
       vertexShader:
@@ -359,22 +416,7 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     water.position.y = -0.8;
     world.add(water);
     // Rocky shoreline and gentle rings in the shallows.
-    for (let i = 0; i < 150; i++) {
-      const a = (i / 150) * Math.PI * 2,
-        r = islandRadius(a) - 0.2 + rand() * 0.65;
-      const rock = meshPart(
-        world,
-        ico,
-        i % 3 ? "#b0b99a" : "#d5cfaf",
-        Math.cos(a) * r,
-        -0.31,
-        Math.sin(a) * r,
-        0.55 + rand() * 0.5,
-        0.5 + rand() * 0.3,
-        0.48 + rand() * 0.5,
-      );
-      rock.rotation.set(rand(), rand() * 3, rand());
-    }
+    addRocks(habitat.shoreRocks);
     for (let ring = 0; ring < 3; ring++) {
       const points = [];
       for (let i = 0; i <= 180; i++) {
@@ -395,44 +437,20 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
       );
     }
     // Tall groves are concentrated around the edges to keep life in the meadow visible.
-    for (let i = 0; i < 58; i++) {
-      const a = rand() * Math.PI * 2,
-        r = 10 + rand() * 6,
-        x = Math.cos(a) * r,
-        z = Math.sin(a) * r;
-      if (x > 4 && z > 4 && rand() < 0.55) continue;
-      const tree = makeTree(rand(), 0.55 + rand() * 0.48);
-      tree.position.set(x, terrainHeight(x, z) - 0.04, z);
-      tree.rotation.y = rand() * 6;
+    for (const t of habitat.trees) {
+      const tree = makeTree(t.kind, t.scale, t.shade);
+      tree.position.set(t.x, terrainHeight(t.x, t.z) - 0.04, t.z);
+      tree.rotation.y = t.rotation;
       world.add(tree);
     }
-    for (let i = 0; i < 75; i++) {
-      const a = rand() * Math.PI * 2,
-        r = Math.sqrt(rand()) * 16,
-        x = Math.cos(a) * r,
-        z = Math.sin(a) * r;
+    for (const f of habitat.ferns) {
       const fern = makeFern();
-      fern.position.set(x, terrainHeight(x, z), z);
-      fern.scale.setScalar(0.5 + rand() * 0.75);
+      fern.position.set(f.x, terrainHeight(f.x, f.z), f.z);
+      fern.scale.setScalar(f.scale);
       world.add(fern);
     }
     // An outcrop, a pond and bright little wildflowers break up the open grassland.
-    for (let i = 0; i < 13; i++) {
-      const x = -8 + (rand() - 0.5) * 5,
-        z = -7 + (rand() - 0.5) * 4;
-      const rock = meshPart(
-        world,
-        ico,
-        rand() > 0.4 ? "#9da997" : "#c0c2aa",
-        x,
-        terrainHeight(x, z) + 0.3,
-        z,
-        0.7 + rand() * 1.7,
-        0.6 + rand() * 2.2,
-        0.7 + rand() * 1.1,
-      );
-      rock.rotation.set(rand() * 0.5, rand() * 4, rand() * 0.4);
-    }
+    addRocks(habitat.outcrop);
     const pondGroup = new THREE.Group();
     pondGroup.position.set(4, terrainHeight(4, -4) + 0.03, -4);
     pondGroup.rotation.x = -Math.PI / 2;
@@ -454,24 +472,7 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     pond.position.z = 0.025;
     pondGroup.add(pond);
     world.add(pondGroup);
-    for (let i = 0; i < 20; i++) {
-      const a = rand() * Math.PI * 2,
-        r = 2.5;
-      const x = 4 + Math.cos(a) * r * 1.3,
-        z = -4 + Math.sin(a) * r * 0.73;
-      const rock = meshPart(
-        world,
-        ico,
-        "#c2c5ab",
-        x,
-        terrainHeight(x, z),
-        z,
-        0.2 + rand() * 0.2,
-        0.16,
-        0.2 + rand() * 0.3,
-      );
-      rock.rotation.y = a;
-    }
+    addRocks(habitat.pondRocks);
     const grassGeometry = new THREE.ConeGeometry(0.055, 0.43, 3);
     const grass = new THREE.InstancedMesh(grassGeometry, mat("#a2bc80"), 700);
     const dummy = new THREE.Object3D();
@@ -511,7 +512,13 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
     batchScenery(world);
     const foods = new Map<number, THREE.Group>();
     const groups = new Map<number, THREE.Group>();
-    internals.current = { camera, controls, groups, following: null };
+    internals.current = {
+      camera,
+      controls,
+      groups,
+      following: null,
+      render: () => renderer.render(scene, camera),
+    };
     const selection = new THREE.Group();
     const circle = new THREE.Mesh(
       new THREE.RingGeometry(0.97, 1.025, 48),
@@ -628,21 +635,19 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
             group.add(sprite);
           }
         }
+        const movement = Math.min(
+          1,
+          Math.hypot(c.velocityX ?? 0, c.velocityZ ?? 0) / 1.6,
+        );
         group.position.set(
           c.x,
-          terrainHeight(c.x, c.z) + Math.sin(elapsed * 5 + c.phase) * 0.035,
+          terrainHeight(c.x, c.z) +
+            Math.sin(sim.time * 5 + c.phase) * 0.035 * movement,
           c.z,
         );
         group.rotation.y = c.heading;
-        const scale =
-          (0.76 + c.genes.size * 0.009) *
-          (0.58 + Math.min(c.age / 20, 1) * 0.42);
-        group.scale.setScalar(scale);
-        animateCreature(
-          group,
-          p.paused ? sim.time : sim.time + c.phase,
-          c.state === "resting" ? 0.1 : 0.6,
-        );
+        group.scale.setScalar(creatureScale(c));
+        animateCreature(group, sim.time + c.phase, movement * 0.6);
         const existing = group.getObjectByName("creatureLabel");
         if (p.labels && !existing) {
           const sprite = makeLabel(
@@ -654,6 +659,36 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
         } else if (!p.labels && existing) {
           disposeLabels(existing);
           group.remove(existing);
+        }
+        const activity =
+          (c.attackFlash ?? 0) > 0
+            ? "ATTACK"
+            : (c.damageFlash ?? 0) > 0
+              ? "HIT"
+              : c.state === "mating" || (c.matingTime ?? 0) > 0
+                ? "♥ MATING"
+                : "";
+        let badge = group.getObjectByName("activityLabel");
+        if (badge && badge.userData.activity !== activity) {
+          disposeLabels(badge);
+          group.remove(badge);
+          badge = undefined;
+        }
+        if (activity && !badge) {
+          badge = makeLabel(
+            activity,
+            activity.includes("MATING") ? "#d699b6" : "#e67e80",
+          );
+          badge.name = "activityLabel";
+          badge.userData.activity = activity;
+          badge.scale.set(2.7, 0.56, 1);
+          group.add(badge);
+        }
+        if (badge) {
+          badge.position.y =
+            (p.labels ? 3.8 : 2.9) + Math.sin(sim.time * 7 + c.phase) * 0.08;
+          const pulse = 1 + Math.sin(sim.time * 10) * 0.08;
+          badge.scale.set(2.7 * pulse, 0.56 * pulse, 1);
         }
       }
       for (const f of sim.food) {
@@ -721,7 +756,7 @@ const World = forwardRef<WorldHandle, Props>(function World(props, ref) {
         p.onTick();
       }
     }
-    animation = requestAnimationFrame(frame);
+    frame(performance.now());
     current.current.onReady();
     return () => {
       running = false;

@@ -1,3 +1,21 @@
+import {
+  CONTACT_GAP,
+  angleDifference,
+  creatureContact,
+  creatureExtent,
+  creatureScale,
+  obstacleContact,
+  clearPath,
+  normalizedHeading,
+  resolveCreatureContacts,
+  steerAroundCreatures,
+  steerAroundObstacles,
+} from "./locomotion";
+import type { MovementIntent } from "./locomotion";
+import { createHabitat, islandRadius, onLand } from "./habitat";
+import type { Obstacle } from "./habitat";
+export { terrainHeight, islandRadius, onLand } from "./habitat";
+
 export type Species = "mossling" | "razorback";
 export type Biome = "meadow" | "drylands" | "lush";
 export interface Genes {
@@ -23,8 +41,17 @@ export interface Creature {
   attackCooldown: number;
   targetX: number;
   targetZ: number;
-  state: "wandering" | "foraging" | "fleeing" | "hunting" | "resting";
+  state:
+    "wandering" | "foraging" | "fleeing" | "hunting" | "resting" | "mating";
   phase: number;
+  velocityX: number;
+  velocityZ: number;
+  targetFoodId?: number;
+  targetCreatureId?: number;
+  restTime?: number;
+  matingTime?: number;
+  attackFlash?: number;
+  damageFlash?: number;
 }
 export interface Food {
   id: number;
@@ -85,26 +112,6 @@ export function mutationCost(before: Genes, after: Genes) {
         12 + diff * 0.32 + (before.adaptation === after.adaptation ? 0 : 12),
       );
 }
-export function terrainHeight(x: number, z: number) {
-  const elevation =
-    0.42 +
-    Math.sin(x * 0.17 + z * 0.07) * 0.6 +
-    Math.cos(z * 0.23 - x * 0.08) * 0.42 +
-    Math.sin(x * 0.48) * Math.cos(z * 0.39) * 0.12 +
-    2.1 * Math.exp(-((x + 9) ** 2 + (z + 6) ** 2) / 30) +
-    1.7 * Math.exp(-((x - 9) ** 2 + (z - 7) ** 2) / 22);
-  const edge = Math.hypot(x, z) / islandRadius(Math.atan2(z, x));
-  const shore = clamp((edge - 0.8) / 0.2, 0, 1);
-  return elevation * (1 - shore) - shore * 0.14;
-}
-export function islandRadius(angle: number) {
-  return (
-    18.7 + Math.sin(angle * 3 + 1.1) * 1.5 + Math.cos(angle * 5 - 0.6) * 0.7
-  );
-}
-export function onLand(x: number, z: number, margin = 1) {
-  return Math.hypot(x, z) < islandRadius(Math.atan2(z, x)) - margin;
-}
 export const speciesName = (s: Species) =>
   s === "mossling" ? "Mossling" : "Razorback";
 
@@ -124,12 +131,14 @@ export class Simulation {
   biome: Biome = "meadow";
   seed: number;
   initialSeed: number;
+  readonly obstacles: readonly Obstacle[];
   private id = 0;
   private lastRecord = -1;
   constructor(seed = 48291, biome: Biome = "meadow") {
     this.seed = seed;
     this.initialSeed = seed;
     this.biome = biome;
+    this.obstacles = createHabitat(seed).obstacles;
     for (let i = 0; i < 24; i++) this.spawn("mossling");
     for (let i = 0; i < 5; i++) this.spawn("razorback");
     for (let i = 0; i < 60; i++) {
@@ -144,7 +153,8 @@ export class Simulation {
     this.record();
   }
   serialize() {
-    return JSON.stringify({ version: 1, state: { ...this } });
+    const { obstacles: _obstacles, ...state } = this;
+    return JSON.stringify({ version: 1, state });
   }
   static restore(serialized: string) {
     const saved = JSON.parse(serialized);
@@ -210,6 +220,28 @@ export class Simulation {
         throw new Error("Invalid creature");
     const sim = new Simulation(state.initialSeed, state.biome);
     Object.assign(sim, state);
+    const needsMigration = sim.creatures.some(
+      (c) => !Number.isFinite(c.velocityX) || !Number.isFinite(c.velocityZ),
+    );
+    const insideScenery = sim.creatures.some((c) =>
+      sim.obstacles.some((o) => obstacleContact(c, o).gap < 0),
+    );
+    if (needsMigration || insideScenery) {
+      for (const c of sim.creatures) {
+        c.velocityX = 0;
+        c.velocityZ = 0;
+        c.heading = normalizedHeading(c.heading);
+      }
+      sim.resolveCollisions();
+    }
+    for (const food of sim.food) {
+      if (
+        sim.obstacles.some(
+          (o) => Math.hypot(food.x - o.x, food.z - o.z) < o.radius + 0.35,
+        )
+      )
+        Object.assign(food, sim.randomPoint());
+    }
     return sim;
   }
   random() {
@@ -218,10 +250,22 @@ export class Simulation {
     this.seed ^= this.seed << 5;
     return (this.seed >>> 0) / 4294967296;
   }
-  randomPoint() {
-    const angle = this.random() * Math.PI * 2,
-      r = Math.sqrt(this.random()) * (islandRadius(angle) - 2);
-    return { x: Math.cos(angle) * r, z: Math.sin(angle) * r };
+  randomPoint(margin = 0.4) {
+    for (let attempt = 0; attempt < 256; attempt++) {
+      const angle = this.random() * Math.PI * 2,
+        r =
+          Math.sqrt(this.random()) *
+          (islandRadius(angle) - Math.max(2, margin));
+      const x = Math.cos(angle) * r,
+        z = Math.sin(angle) * r;
+      if (
+        this.obstacles.every(
+          (o) => Math.hypot(x - o.x, z - o.z) > o.radius + margin,
+        )
+      )
+        return { x, z };
+    }
+    return { x: 0, z: 0 };
   }
   get population() {
     return this.creatures.filter((c) => c.species === "mossling").length;
@@ -247,19 +291,13 @@ export class Simulation {
     );
   }
   spawn(species: Species, parent?: Creature) {
-    let p = parent
-      ? {
-          x: parent.x + (this.random() - 0.5) * 1.2,
-          z: parent.z + (this.random() - 0.5) * 1.2,
-        }
-      : this.randomPoint();
-    if (!onLand(p.x, p.z, 1)) p = this.randomPoint();
-    const target = this.randomPoint();
+    const p = this.randomPoint();
+    const target = this.randomPoint(1.6);
     const creature: Creature = {
       id: ++this.id,
       species,
       ...p,
-      heading: this.random() * Math.PI * 2,
+      heading: normalizedHeading(this.random() * Math.PI * 2),
       age: parent ? 0 : 18 + this.random() * 35,
       energy: parent ? 75 : 70 + this.random() * 30,
       health: 100,
@@ -270,9 +308,219 @@ export class Simulation {
       targetZ: target.z,
       state: "wandering",
       phase: this.random() * 10,
+      velocityX: 0,
+      velocityZ: 0,
     };
+    // Births and initial arrivals need a clear body-sized space, too.
+    let best = { x: creature.x, z: creature.z, clearance: -Infinity };
+    for (let attempt = 0; attempt < 96; attempt++) {
+      const angle = this.random() * Math.PI * 2;
+      const distance = parent
+        ? creatureExtent(parent) +
+          creatureExtent(creature) +
+          0.3 +
+          this.random()
+        : 0;
+      const candidate =
+        parent && attempt < 24
+          ? {
+              x: parent.x + Math.sin(angle) * distance,
+              z: parent.z + Math.cos(angle) * distance,
+            }
+          : this.randomPoint();
+      creature.x = candidate.x;
+      creature.z = candidate.z;
+      this.constrainCreature(creature);
+      let clearance = Infinity;
+      for (const other of this.creatures) {
+        const distance = Math.hypot(creature.x - other.x, creature.z - other.z);
+        const extent = creatureExtent(creature) + creatureExtent(other);
+        const gap =
+          distance > extent + 0.15
+            ? distance - extent
+            : creatureContact(creature, other).gap;
+        clearance = Math.min(clearance, gap);
+      }
+      for (const obstacle of this.obstacles)
+        clearance = Math.min(
+          clearance,
+          obstacleContact(creature, obstacle).gap,
+        );
+      if (clearance > best.clearance)
+        best = { x: creature.x, z: creature.z, clearance };
+      if (clearance >= CONTACT_GAP + 0.12) break;
+    }
+    creature.x = best.x;
+    creature.z = best.z;
     this.creatures.push(creature);
+    if (best.clearance < CONTACT_GAP) this.resolveCollisions();
     return creature;
+  }
+  private constrainCreature = (c: Creature) => {
+    const distance = Math.hypot(c.x, c.z);
+    const radius =
+      islandRadius(Math.atan2(c.z, c.x)) - creatureExtent(c) - 0.15;
+    if (distance > radius) {
+      c.x *= radius / distance;
+      c.z *= radius / distance;
+    }
+  };
+  resolveCollisions() {
+    resolveCreatureContacts(
+      this.creatures,
+      this.constrainCreature,
+      this.obstacles,
+    );
+    // A legacy save can place an animal inside an overlapping group of rocks.
+    // If local projection cannot escape, find the nearest clear patch once.
+    for (const c of this.creatures) {
+      if (this.hasClearSpace(c, 0)) continue;
+      const origin = { x: c.x, z: c.z };
+      let found = false;
+      for (let ring = 1; ring <= 200 && !found; ring++) {
+        const radius = ring * 0.15;
+        const rays = Math.max(32, Math.ceil((Math.PI * 2 * radius) / 0.15));
+        for (let ray = 0; ray < rays; ray++) {
+          const angle = (ray / rays) * Math.PI * 2;
+          c.x = origin.x + Math.sin(angle) * radius;
+          c.z = origin.z + Math.cos(angle) * radius;
+          if (this.hasClearSpace(c)) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        c.x = origin.x;
+        c.z = origin.z;
+      }
+    }
+  }
+  private hasClearSpace(c: Creature, gap = CONTACT_GAP - 0.002) {
+    const extent = creatureExtent(c);
+    if (!onLand(c.x, c.z, extent + 0.149)) return false;
+    for (const o of this.obstacles) {
+      const range = extent + o.radius + gap;
+      if (
+        (o.x - c.x) ** 2 + (o.z - c.z) ** 2 < range * range &&
+        obstacleContact(c, o).gap < gap
+      )
+        return false;
+    }
+    for (const other of this.creatures) {
+      if (other.id === c.id) continue;
+      const range = extent + creatureExtent(other) + gap;
+      if (
+        (other.x - c.x) ** 2 + (other.z - c.z) ** 2 < range * range &&
+        creatureContact(c, other).gap < gap
+      )
+        return false;
+    }
+    return true;
+  }
+  private moveCreatures(intents: MovementIntent[], dt: number) {
+    this.resolveCollisions();
+    const starts = new Map(
+      this.creatures.map((c) => [c.id, { x: c.x, z: c.z }]),
+    );
+    const plans = intents
+      .filter((intent) => starts.has(intent.creature.id))
+      .map((intent) => {
+        const c = intent.creature;
+        let { x, z } = steerAroundObstacles(
+          intent,
+          steerAroundCreatures(intent, this.creatures),
+          this.obstacles,
+        );
+        const distance = Math.hypot(c.x, c.z);
+        if (intent.speed > 0 && distance > 0.0001) {
+          const outwardX = c.x / distance,
+            outwardZ = c.z / distance;
+          const clearance =
+            islandRadius(Math.atan2(c.z, c.x)) -
+            distance -
+            creatureExtent(c) -
+            0.15;
+          const strength = clamp((2.8 - clearance) / 2.8, 0, 1);
+          const outward = Math.max(0, x * outwardX + z * outwardZ);
+          if (outward > 0 && strength > 0) {
+            const tangentX = outwardZ,
+              tangentZ = -outwardX;
+            const tangent = x * tangentX + z * tangentZ;
+            const side =
+              Math.abs(tangent) > 0.1
+                ? Math.sign(tangent)
+                : c.id % 2 === 0
+                  ? 1
+                  : -1;
+            // Shed the outward component and follow the shore; never randomly
+            // reverse the target or rotate the animal after a blocked step.
+            x +=
+              strength *
+              (tangentX * side * outward * 0.9 - outwardX * (outward + 0.25));
+            z +=
+              strength *
+              (tangentZ * side * outward * 0.9 - outwardZ * (outward + 0.25));
+          }
+        }
+        if (intent.speed <= 0 || Math.hypot(x, z) < 0.0001)
+          return { c, heading: c.heading, x: c.x, z: c.z };
+        const desired = Math.atan2(x, z);
+        const difference = angleDifference(desired, c.heading);
+        const maxTurn = dt * (c.state === "fleeing" ? 3 : 2.4);
+        const heading = normalizedHeading(
+          c.heading + clamp(difference, -maxTurn, maxTurn),
+        );
+        const alignment =
+          0.25 +
+          0.75 * Math.max(0, Math.cos(angleDifference(desired, heading)));
+        const travel = intent.speed * alignment * dt;
+        return {
+          c,
+          heading,
+          x: c.x + Math.sin(heading) * travel,
+          z: c.z + Math.cos(heading) * travel,
+        };
+      });
+    // Plans share a snapshot. Sweep both translation and rotation against the
+    // bodies already in the world, stopping at the first solid contact.
+    for (const plan of plans) {
+      const c = plan.c;
+      const origin = { x: c.x, z: c.z, heading: c.heading };
+      const turn = angleDifference(plan.heading, origin.heading);
+      const distance =
+        Math.hypot(plan.x - origin.x, plan.z - origin.z) +
+        Math.abs(turn) * creatureExtent(c);
+      const steps = Math.max(1, Math.ceil(distance / 0.12));
+      const setFraction = (fraction: number) => {
+        c.x = origin.x + (plan.x - origin.x) * fraction;
+        c.z = origin.z + (plan.z - origin.z) * fraction;
+        c.heading = normalizedHeading(origin.heading + turn * fraction);
+      };
+      let safe = 0;
+      for (let step = 1; step <= steps; step++) {
+        const fraction = step / steps;
+        setFraction(fraction);
+        if (this.hasClearSpace(c)) {
+          safe = fraction;
+          continue;
+        }
+        let blocked = fraction;
+        for (let iteration = 0; iteration < 8; iteration++) {
+          const middle = (safe + blocked) / 2;
+          setFraction(middle);
+          if (this.hasClearSpace(c)) safe = middle;
+          else blocked = middle;
+        }
+        setFraction(safe);
+        break;
+      }
+    }
+    for (const c of this.creatures) {
+      const start = starts.get(c.id)!;
+      c.velocityX = (c.x - start.x) / dt;
+      c.velocityZ = (c.z - start.z) / dt;
+    }
   }
   event(kind: WorldEvent["kind"], title: string, description: string) {
     this.events.unshift({
@@ -299,6 +547,7 @@ export class Simulation {
     this.genes = { ...genes };
     for (const c of this.creatures)
       if (c.species === "mossling") c.genes = { ...genes };
+    this.resolveCollisions();
     this.event(
       "evolution",
       "A new chapter in your DNA.",
@@ -330,6 +579,7 @@ export class Simulation {
   }
   update(delta: number) {
     const dt = Math.min(delta, 0.12);
+    if (dt <= 0) return;
     this.time += dt;
     const nextGeneration = Math.floor(this.time / 45) + 1;
     if (nextGeneration > this.generation) {
@@ -362,10 +612,20 @@ export class Simulation {
       }
     const born: Creature[] = [];
     const dead = new Set<number>();
+    const intents: MovementIntent[] = [];
     const prey = this.creatures.filter((c) => c.species === "mossling"),
       predators = this.creatures.filter((c) => c.species === "razorback");
+    const foodClaims = new Map<number, number>();
+    for (const c of prey)
+      if (c.targetFoodId !== undefined && !foodClaims.has(c.targetFoodId))
+        foodClaims.set(c.targetFoodId, c.id);
     for (const c of this.creatures) {
+      c.heading = normalizedHeading(c.heading);
       c.age += dt;
+      c.restTime = Math.max(0, (c.restTime ?? 0) - dt);
+      c.matingTime = Math.max(0, (c.matingTime ?? 0) - dt);
+      c.attackFlash = Math.max(0, (c.attackFlash ?? 0) - dt);
+      c.damageFlash = Math.max(0, (c.damageFlash ?? 0) - dt);
       c.cooldown -= dt;
       c.attackCooldown -= dt;
       c.energy -=
@@ -375,7 +635,7 @@ export class Simulation {
             c.genes.size * 0.004 +
             c.genes.speed * 0.002 +
             (c.genes.adaptation === "spines" ? 0.07 : 0)
-          : 0.4);
+          : 0.85 + c.genes.speed * 0.004 + c.genes.size * 0.002);
       let tx = c.targetX,
         tz = c.targetZ;
       let moving = 1;
@@ -393,81 +653,128 @@ export class Simulation {
         }
         if (danger && dangerDist < vision) {
           c.state = "fleeing";
-          tx = c.x + (c.x - danger.x) * 4;
-          tz = c.z + (c.z - danger.z) * 4;
+          c.matingTime = 0;
+          c.restTime = 0;
+          tx =
+            c.x +
+            (dangerDist > 0.0001
+              ? (c.x - danger.x) / dangerDist
+              : Math.sin(c.heading)) *
+              6;
+          tz =
+            c.z +
+            (dangerDist > 0.0001
+              ? (c.z - danger.z) / dangerDist
+              : Math.cos(c.heading)) *
+              6;
           moving = 1.32;
+          if (
+            c.targetFoodId !== undefined &&
+            foodClaims.get(c.targetFoodId) === c.id
+          )
+            foodClaims.delete(c.targetFoodId);
+          c.targetFoodId = undefined;
         } else if (c.energy < 90) {
-          let nearest: Food | undefined;
-          let dist = Infinity;
-          for (const f of this.food) {
-            if (!f.available) continue;
-            const d = Math.hypot(f.x - c.x, f.z - c.z);
-            if (d < dist) {
-              dist = d;
-              nearest = f;
+          let nearest = this.food.find(
+            (f) =>
+              f.id === c.targetFoodId &&
+              f.available &&
+              foodClaims.get(f.id) === c.id,
+          );
+          let dist = nearest
+            ? Math.hypot(nearest.x - c.x, nearest.z - c.z)
+            : Infinity;
+          if (!nearest) {
+            c.targetFoodId = undefined;
+            for (const f of this.food) {
+              if (!f.available || foodClaims.has(f.id)) continue;
+              const d = Math.hypot(f.x - c.x, f.z - c.z);
+              if (d < dist) {
+                dist = d;
+                nearest = f;
+              }
             }
           }
           if (nearest && dist < vision * 1.9) {
+            c.targetFoodId = nearest.id;
+            foodClaims.set(nearest.id, c.id);
             tx = nearest.x;
             tz = nearest.z;
             c.state = "foraging";
-            if (dist < 0.85) {
+            if (dist < creatureScale(c) * 1.2 + 0.2) {
               nearest.available = false;
               nearest.regrow = foodRegrow;
+              foodClaims.delete(nearest.id);
+              c.targetFoodId = undefined;
               c.energy = Math.min(100, c.energy + 34);
               c.health = Math.min(100, c.health + 10);
               this.dna = Math.min(999, this.dna + 0.32);
-              moving = 0.15;
+              c.restTime = 0.65;
+              moving = 0;
             }
           } else c.state = "wandering";
         } else {
+          if (
+            c.targetFoodId !== undefined &&
+            foodClaims.get(c.targetFoodId) === c.id
+          )
+            foodClaims.delete(c.targetFoodId);
+          c.targetFoodId = undefined;
           c.state = "wandering";
           moving = 0.65;
         }
-        if (
-          c.cooldown <= 0 &&
-          c.energy > 72 &&
-          c.age > 15 &&
-          prey.length + born.filter((b) => b.species === "mossling").length < 64
-        ) {
-          const chance =
-            dt *
-            (0.015 + c.genes.fertility * 0.0008) *
-            (this.biome === "drylands" ? 0.55 : 1);
-          if (this.random() < chance) {
-            born.push(c);
-            c.energy -= 24;
-            c.cooldown = 23;
-          }
-        }
       } else {
-        let nearest: Creature | undefined;
-        let dist = Infinity;
-        for (const p of prey) {
-          if (dead.has(p.id)) continue;
-          const d = Math.hypot(p.x - c.x, p.z - c.z);
-          if (d < dist) {
-            dist = d;
-            nearest = p;
+        let nearest = prey.find(
+          (p) => p.id === c.targetCreatureId && !dead.has(p.id),
+        );
+        let dist = nearest
+          ? Math.hypot(nearest.x - c.x, nearest.z - c.z)
+          : Infinity;
+        if (!nearest || dist > vision + 2) {
+          nearest = undefined;
+          dist = Infinity;
+          for (const p of prey) {
+            if (dead.has(p.id)) continue;
+            const d = Math.hypot(p.x - c.x, p.z - c.z);
+            if (d < dist) {
+              dist = d;
+              nearest = p;
+            }
           }
         }
         if (nearest && dist < vision + 2) {
+          c.targetCreatureId = nearest.id;
           tx = nearest.x;
           tz = nearest.z;
           c.state = "hunting";
           moving = 1.12;
-          if (dist < 1.02 && c.attackCooldown <= 0) {
+          const contact = creatureContact(c, nearest);
+          const facing =
+            dist > 0.0001
+              ? (Math.sin(c.heading) * (nearest.x - c.x) +
+                  Math.cos(c.heading) * (nearest.z - c.z)) /
+                dist
+              : 1;
+          if (contact.gap <= 0.25) moving = 0;
+          if (
+            contact.gap <= 0.25 &&
+            facing > 0.15 &&
+            c.attackCooldown <= 0 &&
+            clearPath(c.x, c.z, nearest.x, nearest.z, this.obstacles)
+          ) {
             const armor =
               1 +
               nearest.genes.defense * 0.028 +
               (nearest.genes.adaptation === "spines" ? 0.55 : 0);
+            c.attackFlash = 0.42;
+            nearest.damageFlash = 0.5;
             nearest.health -= 28 / armor;
             nearest.energy -= 2;
             c.attackCooldown = 0.75;
             if (nearest.genes.adaptation === "spines") c.energy -= 2;
             if (nearest.health <= 0) {
               dead.add(nearest.id);
-              c.energy = Math.min(100, c.energy + 60);
+              c.energy = Math.min(100, c.energy + 48);
               this.deaths++;
               if (this.deaths % 3 === 1)
                 this.event(
@@ -477,42 +784,92 @@ export class Simulation {
                 );
             }
           }
-        } else c.state = "wandering";
-        if (
-          c.cooldown <= 0 &&
-          c.energy > 85 &&
-          predators.length +
-            born.filter((b) => b.species === "razorback").length <
-            14 &&
-          prey.length > 8
-        ) {
-          if (this.random() < dt * 0.025) {
+        } else {
+          c.targetCreatureId = undefined;
+          c.state = "wandering";
+        }
+      }
+      const isPrey = c.species === "mossling";
+      const eligible = isPrey ? prey : predators;
+      const populationLimit = isPrey ? 64 : 14;
+      if (
+        c.state !== "fleeing" &&
+        c.cooldown <= 0 &&
+        c.energy > (isPrey ? 72 : 85) &&
+        c.age > 15 &&
+        eligible.length + born.filter((b) => b.species === c.species).length <
+          populationLimit &&
+        (isPrey || prey.length > 8)
+      ) {
+        let mate: Creature | undefined;
+        let distance = vision;
+        for (const other of eligible) {
+          if (
+            other.id === c.id ||
+            other.cooldown > 0 ||
+            other.energy <= (isPrey ? 72 : 85) ||
+            other.age <= 15 ||
+            other.state === "fleeing" ||
+            dead.has(other.id)
+          )
+            continue;
+          const d = Math.hypot(other.x - c.x, other.z - c.z);
+          if (d < distance) {
+            mate = other;
+            distance = d;
+          }
+        }
+        if (mate) {
+          c.state = "mating";
+          tx = mate.x;
+          tz = mate.z;
+          moving = creatureContact(c, mate).gap < 0.6 ? 0 : 0.8;
+          if (
+            !moving &&
+            this.random() <
+              dt *
+                (0.2 + c.genes.fertility * 0.005) *
+                (this.biome === "drylands" ? 0.55 : 1)
+          ) {
             born.push(c);
-            c.energy -= 30;
-            c.cooldown = 35;
+            for (const partner of [c, mate]) {
+              partner.energy -= isPrey ? 12 : 15;
+              partner.cooldown = isPrey ? 23 : 35;
+              partner.matingTime = 2;
+              partner.restTime = 2;
+              partner.state = "mating";
+            }
           }
         }
       }
-      if (c.energy < 5) c.health -= dt * 4;
+      if (c.energy < 5) c.health -= dt * (c.species === "razorback" ? 6 : 4);
       if (c.energy > 60) c.health = Math.min(100, c.health + dt * 0.6);
       if (c.age > 210) c.health -= dt * 0.65;
       if (c.health <= 0 && !dead.has(c.id)) {
         dead.add(c.id);
         this.deaths++;
+        if (c.species === "razorback" && c.energy < 5)
+          this.event(
+            "danger",
+            "A hunter ran out of food.",
+            "A Razorback died of hunger. Predators need successful hunts to survive.",
+          );
       }
-      if (Math.hypot(tx - c.x, tz - c.z) < 0.9 || !onLand(tx, tz, 0.8)) {
-        const p = this.randomPoint();
+      if (
+        c.state === "wandering" &&
+        (Math.hypot(tx - c.x, tz - c.z) < 1.2 ||
+          !onLand(tx, tz, creatureExtent(c) + 0.3))
+      ) {
+        const p = this.randomPoint(creatureExtent(c) + 0.15);
         c.targetX = p.x;
         c.targetZ = p.z;
-        if (c.state !== "hunting" && c.state !== "foraging") {
-          tx = p.x;
-          tz = p.z;
-        }
+        tx = p.x;
+        tz = p.z;
       }
-      const angle = Math.atan2(tx - c.x, tz - c.z);
-      let difference =
-        ((angle - c.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-      c.heading += difference * Math.min(1, dt * 5);
+      if (c.restTime > 0 && c.state !== "fleeing") {
+        moving = 0;
+        c.state = c.matingTime > 0 ? "mating" : "resting";
+      }
       const speed =
         (0.5 + c.genes.speed * 0.024) *
         (c.species === "razorback" ? 1.03 : 1) *
@@ -520,19 +877,18 @@ export class Simulation {
         moving *
         (c.age < 15 ? 0.7 : 1) *
         (c.energy < 18 ? 0.65 : 1);
-      const nx = c.x + Math.sin(c.heading) * speed * dt,
-        nz = c.z + Math.cos(c.heading) * speed * dt;
-      if (onLand(nx, nz, 0.8)) {
-        c.x = nx;
-        c.z = nz;
-      } else {
-        c.heading += Math.PI * 0.45;
-        const p = this.randomPoint();
-        c.targetX = p.x;
-        c.targetZ = p.z;
-      }
+      if (!dead.has(c.id))
+        intents.push({
+          creature: c,
+          x: tx - c.x,
+          z: tz - c.z,
+          speed,
+          targetCreature:
+            c.state === "hunting" ? c.targetCreatureId : undefined,
+        });
     }
     this.creatures = this.creatures.filter((c) => !dead.has(c.id));
+    this.moveCreatures(intents, dt);
     for (const parent of born)
       if (!dead.has(parent.id)) {
         this.spawn(parent.species, parent);
@@ -545,6 +901,7 @@ export class Simulation {
             `Your population is growing. The new arrival inherits your current traits.`,
           );
       }
+    this.resolveCollisions();
     if (prey.length > 0 && this.population === 0)
       this.event(
         "danger",
