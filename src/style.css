@@ -1429,6 +1429,87 @@ button svg {
 .gene-control {
   margin-top: 15px;
 }
+.evolution-tier-card {
+  padding: 13px;
+  margin: 0 0 20px;
+  background: var(--ef-bg-dim);
+  border: 1px solid var(--ef-bg3);
+  border-radius: 9px;
+}
+.tier-card-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  font-size: 11px;
+}
+.tier-card-heading > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ef-green);
+}
+.tier-card-heading > strong {
+  font-size: 10px;
+  font-weight: 500;
+}
+.evolution-tier-card > p {
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--ef-grey2);
+  margin: 9px 0;
+}
+.tier-progress {
+  height: 4px;
+  border-radius: 4px;
+  background: var(--ef-bg2);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.tier-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--ef-green);
+}
+.tier-unlock-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  font-size: 10px;
+  border: 1px solid var(--ef-green);
+  color: var(--ef-green);
+  border-radius: 6px;
+}
+.tier-unlock-button > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.tier-unlock-button > strong {
+  font-size: 10px;
+  font-weight: 500;
+}
+.tier-unlock-button:hover:not(:disabled) {
+  background: var(--ef-bg-green);
+}
+.tier-unlock-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  border-color: var(--ef-bg3);
+}
+.evolution-tier-card > small {
+  display: block;
+  color: var(--ef-grey1);
+  font-size: 8px;
+  line-height: 1.6;
+  margin-top: 9px;
+}
+.trait-row .trait-number {
+  min-width: 25px;
+}
 .gene-control > label {
   display: flex;
   align-items: center;

@@ -59,7 +59,7 @@ const traitInfo: {
     label: "Body size",
     icon: Maximize2,
     description:
-      "A bigger body looks impressive, but needs more food to stay healthy.",
+      "Bigger bodies need more food and space. Advanced levels improve resilience as growth slows.",
   },
   {
     key: "defense",
@@ -456,6 +456,14 @@ export default function App() {
   const genes =
     species === "mossling" ? simulation.genes : simulation.predatorGenes;
   const cost = mutationCost(simulation.genes, draft);
+  const traitCeiling = simulation.traitCeiling;
+  const displayCeiling =
+    species === "mossling"
+      ? traitCeiling
+      : Math.max(
+          100,
+          Math.ceil(Math.max(...geneKeys.map((key) => genes[key])) / 100) * 100,
+        );
   const alive =
     species === "mossling" ? simulation.population : simulation.predators;
   const latest = simulation.events[0];
@@ -959,7 +967,11 @@ export default function App() {
             </div>
             <div className="traits-heading">
               <span className="eyebrow">EVOLVED TRAITS</span>
-              <span>GEN {number(simulation.generation)}</span>
+              <span>
+                {species === "mossling"
+                  ? `TIER ${number(simulation.evolutionTier)}`
+                  : `GEN ${number(simulation.generation)}`}
+              </span>
             </div>
             <div className="trait-list">
               {traitInfo.map(({ key, label, icon: Icon, description }) => (
@@ -970,7 +982,9 @@ export default function App() {
                     {[0, 1, 2, 3, 4, 5, 6].map((i) => (
                       <i
                         key={i}
-                        className={(genes[key] / 100) * 7 > i ? "filled" : ""}
+                        className={
+                          (genes[key] / displayCeiling) * 7 > i ? "filled" : ""
+                        }
                       />
                     ))}
                   </div>
@@ -1110,6 +1124,63 @@ export default function App() {
                     <h3>Shape your species</h3>
                     <span>01 — GENOME</span>
                   </div>
+                  <div className="evolution-tier-card">
+                    <div className="tier-card-heading">
+                      <span>
+                        <Sparkles size={14} /> Evolution tier{" "}
+                        {simulation.evolutionTier}
+                      </span>
+                      <strong>Up to {traitCeiling}</strong>
+                    </div>
+                    <p>
+                      {simulation.canUnlockTier
+                        ? `A trait reached ${traitCeiling}. Unlock the next tier to keep evolving.`
+                        : `Reach ${traitCeiling} in any one trait to unlock the next tier.`}
+                    </p>
+                    <div
+                      className="tier-progress"
+                      role="progressbar"
+                      aria-label="Progress to the next evolution tier"
+                      aria-valuemin={0}
+                      aria-valuemax={traitCeiling}
+                      aria-valuenow={Math.max(
+                        ...geneKeys.map((key) => simulation.genes[key]),
+                      )}
+                    >
+                      <i
+                        style={{
+                          width: `${Math.min(100, (Math.max(...geneKeys.map((key) => simulation.genes[key])) / traitCeiling) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <button
+                      className="tier-unlock-button"
+                      disabled={
+                        !simulation.canUnlockTier ||
+                        simulation.dna < simulation.nextTierCost
+                      }
+                      onClick={() => {
+                        if (simulation.unlockTier()) {
+                          tick();
+                          notify(
+                            `Tier ${simulation.evolutionTier} unlocked. Traits can now reach ${simulation.traitCeiling}.`,
+                          );
+                        }
+                      }}
+                    >
+                      <span>
+                        Unlock tier {simulation.evolutionTier + 1}{" "}
+                        <ArrowUpRight size={13} />
+                      </span>
+                      <strong>
+                        {simulation.nextTierCost.toLocaleString()} DNA
+                      </strong>
+                    </button>
+                    <small>
+                      Next limit: {traitCeiling + 100} · Each generation earns{" "}
+                      {simulation.generationReward} DNA
+                    </small>
+                  </div>
                   {traitInfo.map(({ key, label, icon: Icon, description }) => (
                     <div className="gene-control" key={key}>
                       <label htmlFor={`gene-${key}`}>
@@ -1127,12 +1198,12 @@ export default function App() {
                         id={`gene-${key}`}
                         type="range"
                         min="10"
-                        max="95"
+                        max={traitCeiling}
                         step="1"
                         value={draft[key]}
                         style={
                           {
-                            "--range-value": `${((draft[key] - 10) / 85) * 100}%`,
+                            "--range-value": `${((draft[key] - 10) / (traitCeiling - 10)) * 100}%`,
                           } as React.CSSProperties
                         }
                         onChange={(e) =>
@@ -1177,7 +1248,7 @@ export default function App() {
                 <div className="mutation-total">
                   <span>
                     {cost > 0 ? "Mutation cost" : "Ready to experiment"}
-                    <strong>{cost} DNA</strong>
+                    <strong>{cost.toLocaleString()} DNA</strong>
                   </span>
                   <span className={cost > simulation.dna ? "not-enough" : ""}>
                     {Math.floor(simulation.dna)} available
@@ -1193,8 +1264,8 @@ export default function App() {
                 </div>
                 <div className="lab-footnote">
                   {cost > simulation.dna
-                    ? "You need more DNA. Keep simulating: feeding earns DNA and each generation grants 35 points."
-                    : "The island pauses while you edit. Apply your genome, then watch life respond."}
+                    ? `You need more DNA. Feeding earns DNA and each generation grants ${simulation.generationReward} points.`
+                    : "Higher levels cost more DNA and give gradual gains. The island pauses while you edit."}
                 </div>
               </div>
             </section>
@@ -1296,7 +1367,7 @@ export default function App() {
                   {
                     icon: Dna,
                     title: "Give evolution a little nudge",
-                    text: "Open the creature lab to change legs, body size, armor, perception, fertility and adaptations. Your genome applies to every Mossling and their offspring.",
+                    text: "Change your traits in the creature lab. Reach a tier's trait limit, then spend DNA to open another 100 points per trait. Higher upgrades cost more, and new tiers improve DNA earnings. Your genome applies to every Mossling and their offspring.",
                   },
                   {
                     icon: Leaf,

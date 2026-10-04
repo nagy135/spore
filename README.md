@@ -19,7 +19,10 @@ Your Mosslings live on an island with evolving Razorback predators. Watch them s
 - Click the north compass to face north. The enlarged minimap shows live animal positions; camera controls sit alongside it.
 - Red **ATTACK** and **HIT** labels mark bites. Purple **♥ MATING** labels mark courtship and breeding. Breeding requires two adult animals with enough energy; both parents recover before breeding again.
 - **Space** pauses or resumes; **M** opens the creature lab; **R** resets the camera.
-- Switch between 1×, 2× and 4× time. Each 45 world seconds begins a generation, rewards 35 DNA, and evolves predator speed, senses, and size.
+- Switch between 1×, 2× and 4× time. Each 45 world seconds begins a generation, rewards 35 DNA at tier 1, and evolves predator speed, senses, and size.
+- Evolution tiers extend progression: tier 1 allows traits up to 100. Reach that limit in any one applied trait and spend DNA to unlock the next tier, adding another 100 points to every trait's range. There is always a further tier to unlock. Mutation prices grow with the level being purchased; splitting purchases does not make them cheaper. Downgrades do not refund DNA.
+- Each new tier adds 15 DNA to generation rewards and 0.08 DNA to feeding rewards. DNA savings have no 999-point cap. Existing worlds retain their genomes and savings when upgrading.
+- Advanced genetic levels give gradual biological gains. Physical size approaches a natural limit while body resilience keeps improving. Large animals have a lower population capacity, so high-level genomes preserve navigable bodies and collision boundaries.
 - Feeding also earns DNA. Mutations spend DNA; speed costs energy, size costs food, and armor slows movement while reducing damage. Antennae extend perception, spines add defense, and plumes and pigment are cosmetic.
 - Try a lush rainforest or a dry season to change food regrowth. Use **New world** to restart with a different simulation and scenery seed.
 - The population graph and field notes show the consequences. Extinct Mosslings can be reintroduced using your latest genome.
@@ -34,7 +37,7 @@ npm test
 npm run build
 ```
 
-The simulation tests cover seeded behavior, paired breeding and activity signals, hunger and hunting, inheritance, mutation costs, armor, predator evolution, food regrowth, extinction recovery, save migration, collision spacing, head-on passing and shoreline escape.
+The simulation tests cover seeded behavior, paired breeding and activity signals, hunger and hunting, inheritance, tier unlocks and escalating mutation costs, advanced-genome collisions and resilience, armor, predator evolution, food regrowth, extinction recovery, save migration, collision spacing, head-on passing and shoreline escape.
 
 ## Deployment
 
@@ -52,6 +55,7 @@ The script pulls origin, installs locked dependencies, runs tests and builds on 
 
 - `src/simulation.ts` — deterministic agent simulation and save state.
 - `src/locomotion.ts` — body footprints, collision constraints and avoidance steering.
+- `src/progression.ts` — evolution tiers, escalating mutation prices and trait expression.
 - `src/habitat.ts` — seeded scenery shared by rendering and collision boundaries.
 - `src/World.tsx` — Three.js island, instanced scenery, camera and creature interaction.
 - `src/creatures.ts` — procedural, animated creatures derived from genes.

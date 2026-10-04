@@ -356,3 +356,179 @@ test("reproduction requires two adults and shows a mating activity", () => {
   );
   assertClear(sim);
 });
+
+test("the starting budget cannot max out all traits, and advanced upgrades cost progressively more", () => {
+  const sim = new Simulation();
+  const maximum = {
+    ...sim.genes,
+    speed: 100,
+    size: 100,
+    defense: 100,
+    sense: 100,
+    fertility: 100,
+  };
+  assert.ok(mutationCost(sim.genes, maximum) > sim.dna * 3);
+  assert.equal(sim.mutate(maximum), false);
+  const at = (speed: number) => ({ ...DEFAULT_GENES, speed });
+  assert.ok(mutationCost(at(200), at(210)) > mutationCost(at(100), at(110)));
+  assert.ok(
+    mutationCost(at(100), at(150)) + mutationCost(at(150), at(200)) >=
+      mutationCost(at(100), at(200)),
+    "splitting an upgrade offers no discount",
+  );
+});
+
+test("tiers require an applied milestone and DNA, then continue opening new trait ranges", () => {
+  const sim = new Simulation();
+  sim.dna = 1_000_000;
+  assert.equal(sim.unlockTier(), false, "DNA alone cannot skip the milestone");
+  assert.equal(
+    sim.mutate({ ...sim.genes, speed: 101 }),
+    false,
+    "locked levels cannot be bought",
+  );
+  for (let tier = 1; tier <= 10; tier++) {
+    assert.equal(sim.mutate({ ...sim.genes, speed: tier * 100 }), true);
+    const cost = sim.nextTierCost;
+    sim.dna = cost - 1;
+    assert.equal(
+      sim.unlockTier(),
+      false,
+      "the full breakthrough cost is required",
+    );
+    sim.dna = cost;
+    assert.equal(sim.unlockTier(), true);
+    assert.equal(sim.dna, 0);
+    assert.equal(sim.evolutionTier, tier + 1);
+    assert.equal(sim.traitCeiling, (tier + 1) * 100);
+    sim.dna = 1_000_000;
+  }
+  assert.equal(sim.genes.speed, 1_000);
+  assert.equal(
+    sim.traitCeiling,
+    1_100,
+    "there is another tier beyond level one thousand",
+  );
+  sim.creatures = [];
+  sim.food = [];
+  sim.time = 44.95;
+  const balance = sim.dna;
+  sim.update(0.1);
+  assert.equal(
+    sim.dna - balance,
+    sim.generationReward,
+    "higher tiers also increase generation earnings",
+  );
+});
+
+test("invalid or locked mutations never spend DNA", () => {
+  const sim = new Simulation();
+  sim.dna = 10_000;
+  for (const speed of [-1, NaN, Infinity, 101]) {
+    assert.equal(sim.mutate({ ...sim.genes, speed }), false);
+    assert.equal(sim.dna, 10_000);
+  }
+  assert.deepEqual(sim.genes, DEFAULT_GENES);
+});
+
+test("advanced genomes grow, move, breed and restore without breaking collision boundaries", () => {
+  const sim = new Simulation(123);
+  sim.evolutionTier = 10;
+  sim.dna = 1_000_000;
+  const genes = {
+    ...sim.genes,
+    speed: 1_000,
+    size: 1_000,
+    defense: 1_000,
+    sense: 1_000,
+    fertility: 1_000,
+  };
+  assert.equal(sim.mutate(genes), true);
+  const child = sim.spawn("mossling", sim.creatures[0]);
+  assert.deepEqual(child.genes, genes);
+  for (let i = 0; i < 250; i++) {
+    sim.update(0.08);
+    assertClear(sim);
+  }
+  assert.ok(
+    sim.creatures.every((c) =>
+      [c.x, c.z, c.velocityX, c.velocityZ, c.heading, c.health].every(
+        Number.isFinite,
+      ),
+    ),
+  );
+  const restored = Simulation.restore(sim.serialize());
+  assert.equal(restored.serialize(), sim.serialize());
+  assert.equal(restored.evolutionTier, 10);
+  advance(sim, 2);
+  advance(restored, 2);
+  assert.deepEqual(restored.creatures, sim.creatures);
+});
+
+test("old saves retain genomes and accumulated DNA, and feeding never caps the bank", () => {
+  const original = new Simulation();
+  original.creatures = original.creatures.slice(0, 1);
+  original.dna = 10_000;
+  const saved = JSON.parse(original.serialize());
+  saved.version = 1;
+  delete saved.state.evolutionTier;
+  const sim = Simulation.restore(JSON.stringify(saved));
+  assert.equal(sim.evolutionTier, 1);
+  assert.equal(sim.dna, 10_000);
+  assert.deepEqual(sim.genes, original.genes);
+  const c = sim.creatures[0];
+  c.x = 0;
+  c.z = 0;
+  c.energy = 60;
+  sim.food = [{ id: 0, x: 0, z: 0, available: true, regrow: 0 }];
+  sim.update(0.1);
+  assert.ok(
+    sim.dna > 10_000,
+    "feeding adds to the bank instead of reducing it to 999",
+  );
+  const corrupt = JSON.parse(sim.serialize());
+  corrupt.state.evolutionTier = 0;
+  assert.throws(() => Simulation.restore(JSON.stringify(corrupt)));
+});
+
+test("predators continue evolving after the old 95 point ceiling", () => {
+  const sim = new Simulation();
+  sim.predatorGenes.speed = 95;
+  sim.predatorGenes.sense = 100;
+  sim.predatorGenes.size = 90;
+  sim.time = 44.95;
+  sim.update(0.1);
+  assert.equal(sim.predatorGenes.speed, 98);
+  assert.equal(sim.predatorGenes.sense, 102);
+  assert.equal(sim.predatorGenes.size, 91);
+  assert.ok(
+    sim.creatures
+      .filter((c) => c.species === "razorback")
+      .every((c) => c.genes.speed === 98 && Number.isFinite(c.x)),
+  );
+});
+
+test("advanced body levels keep improving resilience after physical growth slows", () => {
+  function encounter(size: number) {
+    const sim = new Simulation(32);
+    sim.evolutionTier = 5;
+    sim.creatures = sim.creatures.slice(0, 1);
+    sim.food = [];
+    const prey = sim.creatures[0];
+    prey.genes.size = size;
+    Object.assign(prey, { x: 0, z: 0, heading: 0, cooldown: 999 });
+    const predator = sim.spawn("razorback");
+    Object.assign(predator, {
+      x: 0,
+      z: creatureExtent(prey) + creatureExtent(predator) + 0.08,
+      heading: Math.PI,
+      cooldown: 999,
+    });
+    sim.update(0.1);
+    return prey.health;
+  }
+  assert.ok(
+    encounter(500) > encounter(100),
+    "higher body levels still protect against bites",
+  );
+});

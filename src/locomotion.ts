@@ -1,5 +1,6 @@
 import type { Creature } from "./simulation";
 import type { Obstacle } from "./habitat";
+import { expressGene } from "./progression";
 
 export const CONTACT_GAP = 0.04;
 const EPSILON = 1e-8;
@@ -7,7 +8,8 @@ const EPSILON = 1e-8;
 // The same size and juvenile growth factors are used by the Three.js model.
 export function creatureScale(c: Creature) {
   return (
-    (0.76 + c.genes.size * 0.009) * (0.58 + Math.min(c.age / 20, 1) * 0.42)
+    (0.76 + expressGene("size", c.genes.size) * 0.009) *
+    (0.58 + Math.min(c.age / 20, 1) * 0.42)
   );
 }
 export function creatureExtent(c: Creature) {

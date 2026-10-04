@@ -1,3 +1,4 @@
+import { expressedGenes } from "./progression";
 import * as THREE from "three";
 import type { Genes, Species } from "./simulation";
 
@@ -56,10 +57,14 @@ function stalk(
 }
 export function makeCreature(genes: Genes, species: Species = "mossling") {
   const group = new THREE.Group();
+  const traits = expressedGenes(genes);
+  traits.speed = Math.min(traits.speed, 160);
+  traits.defense = Math.min(traits.defense, 150);
+  traits.sense = Math.min(traits.sense, 150);
   const bodyColor = new THREE.Color(genes.color),
     light = "#d7e8b6",
     dark = bodyColor.clone().multiplyScalar(0.62).getStyle();
-  const s = 0.76 + genes.size * 0.009;
+  const s = 0.76 + traits.size * 0.009;
   const isPredator = species === "razorback";
   part(group, sphere, genes.color, [0, 0.64, 0], [0.53, 0.46, 0.83], "body");
   part(
@@ -105,7 +110,7 @@ export function makeCreature(genes: Genes, species: Species = "mossling") {
       brow.rotation.z = sign * -0.28;
     }
   }
-  const legLength = 0.26 + genes.speed * 0.0034;
+  const legLength = 0.26 + traits.speed * 0.0034;
   for (const sign of [-1, 1])
     for (const z of [-0.46, 0.43]) {
       const leg = new THREE.Group();
@@ -137,13 +142,13 @@ export function makeCreature(genes: Genes, species: Species = "mossling") {
     "tail",
   );
   tail.rotation.x = -Math.PI * 0.65;
-  if (genes.defense > 8) {
+  if (traits.defense > 8) {
     const shell = part(
       group,
       sphere,
       isPredator ? "#b57156" : dark,
       [0, 0.86, -0.12],
-      [0.47 + genes.defense * 0.001, 0.14 + genes.defense * 0.0025, 0.65],
+      [0.47 + traits.defense * 0.001, 0.14 + traits.defense * 0.0025, 0.65],
     );
     shell.name = "shell";
     for (let i = 0; i < 3; i++)
@@ -151,14 +156,14 @@ export function makeCreature(genes: Genes, species: Species = "mossling") {
         group,
         sphere,
         isPredator ? "#ce9479" : "#bad583",
-        [0, 0.98 + genes.defense * 0.0015, -0.52 + i * 0.32],
+        [0, 0.98 + traits.defense * 0.0015, -0.52 + i * 0.32],
         [0.26, 0.04, 0.045],
       );
   }
   if (genes.adaptation === "antennae") {
     for (const sign of [-1, 1]) {
       const a = new THREE.Vector3(sign * 0.25, 1.07, 0.74),
-        b = new THREE.Vector3(sign * 0.42, 1.56 + genes.sense * 0.002, 0.7);
+        b = new THREE.Vector3(sign * 0.42, 1.56 + traits.sense * 0.002, 0.7);
       stalk(group, a, b, 0.035, dark);
       part(
         group,
@@ -176,7 +181,7 @@ export function makeCreature(genes: Genes, species: Species = "mossling") {
         cone,
         isPredator ? "#efd5af" : "#d4e6ae",
         [0, 1.02, -0.58 + i * 0.29],
-        [0.14, 0.4 + genes.defense * 0.002, 0.16],
+        [0.14, 0.4 + traits.defense * 0.002, 0.16],
       );
       spike.rotation.x = -0.22;
     }

@@ -14,7 +14,17 @@ import {
 import type { MovementIntent } from "./locomotion";
 import { createHabitat, islandRadius, onLand } from "./habitat";
 import type { Obstacle } from "./habitat";
+import {
+  TRAIT_KEYS,
+  TIER_RANGE,
+  expressedGenes,
+  bodyResilience,
+  mutationCost,
+  tierUnlockCost,
+  validGenes,
+} from "./progression";
 export { terrainHeight, islandRadius, onLand } from "./habitat";
+export { mutationCost } from "./progression";
 
 export type Species = "mossling" | "razorback";
 export type Biome = "meadow" | "drylands" | "lush";
@@ -90,28 +100,9 @@ export const PREDATOR_GENES: Genes = {
   color: "#d88a6e",
   adaptation: "spines",
 };
-export const geneKeys = [
-  "speed",
-  "size",
-  "defense",
-  "sense",
-  "fertility",
-] as const;
+export const geneKeys = TRAIT_KEYS;
 export const clamp = (v: number, a: number, b: number) =>
   Math.max(a, Math.min(b, v));
-export function mutationCost(before: Genes, after: Genes) {
-  const diff = geneKeys.reduce(
-    (sum, key) => sum + Math.abs(before[key] - after[key]),
-    0,
-  );
-  return diff === 0 &&
-    before.color === after.color &&
-    before.adaptation === after.adaptation
-    ? 0
-    : Math.ceil(
-        12 + diff * 0.32 + (before.adaptation === after.adaptation ? 0 : 12),
-      );
-}
 export const speciesName = (s: Species) =>
   s === "mossling" ? "Mossling" : "Razorback";
 
@@ -125,6 +116,7 @@ export class Simulation {
   time = 0;
   generation = 1;
   dna = 120;
+  evolutionTier = 1;
   births = 0;
   preyBirths = 0;
   deaths = 0;
@@ -154,13 +146,13 @@ export class Simulation {
   }
   serialize() {
     const { obstacles: _obstacles, ...state } = this;
-    return JSON.stringify({ version: 1, state });
+    return JSON.stringify({ version: 2, state });
   }
   static restore(serialized: string) {
     const saved = JSON.parse(serialized);
     const state = saved?.state;
     if (
-      saved?.version !== 1 ||
+      ![1, 2].includes(saved?.version) ||
       !state ||
       !Array.isArray(state.creatures) ||
       state.creatures.length > 100 ||
@@ -185,22 +177,26 @@ export class Simulation {
     ])
       if (!Number.isFinite(state[key]))
         throw new Error("Invalid simulation state");
-    const validGenes = (g: Genes) =>
-      g &&
-      geneKeys.every(
-        (key) => Number.isFinite(g[key]) && g[key] >= 0 && g[key] <= 100,
-      ) &&
-      /^#[0-9a-f]{6}$/i.test(g.color) &&
-      ["antennae", "spines", "plumes"].includes(g.adaptation);
+    const evolutionTier =
+      state.evolutionTier ?? (saved.version === 1 ? 1 : undefined);
     if (
-      !validGenes(state.genes) ||
+      !Number.isSafeInteger(evolutionTier) ||
+      evolutionTier < 1 ||
+      !Number.isSafeInteger(evolutionTier * TIER_RANGE)
+    )
+      throw new Error("Invalid evolution tier");
+    if (
+      !validGenes(state.genes, evolutionTier * TIER_RANGE) ||
       !validGenes(state.predatorGenes) ||
       !["meadow", "lush", "drylands"].includes(state.biome)
     )
       throw new Error("Invalid genome");
     for (const c of state.creatures)
       if (
-        !validGenes(c.genes) ||
+        !validGenes(
+          c.genes,
+          c.species === "mossling" ? evolutionTier * TIER_RANGE : undefined,
+        ) ||
         !["mossling", "razorback"].includes(c.species) ||
         ![
           "x",
@@ -220,6 +216,7 @@ export class Simulation {
         throw new Error("Invalid creature");
     const sim = new Simulation(state.initialSeed, state.biome);
     Object.assign(sim, state);
+    sim.evolutionTier = evolutionTier;
     const needsMigration = sim.creatures.some(
       (c) => !Number.isFinite(c.velocityX) || !Number.isFinite(c.velocityZ),
     );
@@ -269,6 +266,34 @@ export class Simulation {
   }
   get population() {
     return this.creatures.filter((c) => c.species === "mossling").length;
+  }
+  get traitCeiling() {
+    return this.evolutionTier * TIER_RANGE;
+  }
+  get nextTierCost() {
+    return tierUnlockCost(this.evolutionTier);
+  }
+  get canUnlockTier() {
+    return geneKeys.some((key) => this.genes[key] >= this.traitCeiling);
+  }
+  get generationReward() {
+    return 35 + (this.evolutionTier - 1) * 15;
+  }
+  unlockTier() {
+    if (
+      !this.canUnlockTier ||
+      this.dna < this.nextTierCost ||
+      !Number.isSafeInteger((this.evolutionTier + 1) * TIER_RANGE)
+    )
+      return false;
+    this.dna -= this.nextTierCost;
+    this.evolutionTier++;
+    this.event(
+      "evolution",
+      `Evolution tier ${this.evolutionTier} unlocked.`,
+      `Your traits can now reach ${this.traitCeiling}. Each generation earns ${this.generationReward} DNA.`,
+    );
+    return true;
   }
   get predators() {
     return this.creatures.filter((c) => c.species === "razorback").length;
@@ -541,6 +566,7 @@ export class Simulation {
     if (this.history.length > 90) this.history.shift();
   }
   mutate(genes: Genes) {
+    if (!validGenes(genes, this.traitCeiling)) return false;
     const cost = mutationCost(this.genes, genes);
     if (cost === 0 || cost > this.dna) return false;
     this.dna -= cost;
@@ -584,23 +610,19 @@ export class Simulation {
     const nextGeneration = Math.floor(this.time / 45) + 1;
     if (nextGeneration > this.generation) {
       this.generation = nextGeneration;
-      this.dna += 35;
+      this.dna += this.generationReward;
       this.predatorGenes = {
         ...this.predatorGenes,
-        speed: clamp(this.predatorGenes.speed + 3, 0, 95),
-        sense: clamp(this.predatorGenes.sense + 2, 0, 95),
-        size: clamp(
-          this.predatorGenes.size + (this.genes.defense > 55 ? 3 : 1),
-          0,
-          90,
-        ),
+        speed: this.predatorGenes.speed + 3,
+        sense: this.predatorGenes.sense + 2,
+        size: this.predatorGenes.size + (this.genes.defense > 55 ? 3 : 1),
       };
       for (const c of this.creatures)
         if (c.species === "razorback") c.genes = { ...this.predatorGenes };
       this.event(
         "evolution",
         `Generation ${this.generation}: predators adapt.`,
-        `Razorbacks evolved faster legs and sharper senses. You gained 35 DNA.`,
+        `Razorbacks evolved faster legs and sharper senses. You gained ${this.generationReward} DNA.`,
       );
     }
     const foodRegrow =
@@ -620,6 +642,7 @@ export class Simulation {
       if (c.targetFoodId !== undefined && !foodClaims.has(c.targetFoodId))
         foodClaims.set(c.targetFoodId, c.id);
     for (const c of this.creatures) {
+      const traits = expressedGenes(c.genes);
       c.heading = normalizedHeading(c.heading);
       c.age += dt;
       c.restTime = Math.max(0, (c.restTime ?? 0) - dt);
@@ -632,15 +655,15 @@ export class Simulation {
         dt *
         (c.species === "mossling"
           ? 0.38 +
-            c.genes.size * 0.004 +
-            c.genes.speed * 0.002 +
+            traits.size * 0.004 +
+            traits.speed * 0.002 +
             (c.genes.adaptation === "spines" ? 0.07 : 0)
-          : 0.85 + c.genes.speed * 0.004 + c.genes.size * 0.002);
+          : 0.85 + traits.speed * 0.004 + traits.size * 0.002);
       let tx = c.targetX,
         tz = c.targetZ;
       let moving = 1;
       const vision =
-        3 + c.genes.sense * 0.1 + (c.genes.adaptation === "antennae" ? 1.8 : 0);
+        3 + traits.sense * 0.1 + (c.genes.adaptation === "antennae" ? 1.8 : 0);
       if (c.species === "mossling") {
         let danger: Creature | undefined;
         let dangerDist = Infinity;
@@ -708,7 +731,7 @@ export class Simulation {
               c.targetFoodId = undefined;
               c.energy = Math.min(100, c.energy + 34);
               c.health = Math.min(100, c.health + 10);
-              this.dna = Math.min(999, this.dna + 0.32);
+              this.dna += 0.32 + (this.evolutionTier - 1) * 0.08;
               c.restTime = 0.65;
               moving = 0;
             }
@@ -764,7 +787,8 @@ export class Simulation {
           ) {
             const armor =
               1 +
-              nearest.genes.defense * 0.028 +
+              expressedGenes(nearest.genes).defense * 0.028 +
+              bodyResilience(nearest.genes.size) +
               (nearest.genes.adaptation === "spines" ? 0.55 : 0);
             c.attackFlash = 0.42;
             nearest.damageFlash = 0.5;
@@ -791,7 +815,12 @@ export class Simulation {
       }
       const isPrey = c.species === "mossling";
       const eligible = isPrey ? prey : predators;
-      const populationLimit = isPrey ? 64 : 14;
+      const baseScale =
+        0.76 + (isPrey ? DEFAULT_GENES.size : PREDATOR_GENES.size) * 0.009;
+      const currentScale = 0.76 + traits.size * 0.009;
+      const populationLimit = Math.floor(
+        (isPrey ? 64 : 14) * Math.min(1, (baseScale / currentScale) ** 2),
+      );
       if (
         c.state !== "fleeing" &&
         c.cooldown <= 0 &&
@@ -828,7 +857,7 @@ export class Simulation {
             !moving &&
             this.random() <
               dt *
-                (0.2 + c.genes.fertility * 0.005) *
+                (0.2 + traits.fertility * 0.005) *
                 (this.biome === "drylands" ? 0.55 : 1)
           ) {
             born.push(c);
@@ -871,9 +900,9 @@ export class Simulation {
         c.state = c.matingTime > 0 ? "mating" : "resting";
       }
       const speed =
-        (0.5 + c.genes.speed * 0.024) *
+        (0.5 + traits.speed * 0.024) *
         (c.species === "razorback" ? 1.03 : 1) *
-        (1 - c.genes.defense * 0.0022) *
+        Math.max(0.3, 1 - traits.defense * 0.0022) *
         moving *
         (c.age < 15 ? 0.7 : 1) *
         (c.energy < 18 ? 0.65 : 1);
